@@ -1,11 +1,10 @@
 from typing import Annotated
-
 from langchain.chat_models import init_chat_model
 from typing_extensions import TypedDict
 import os
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langchain.agents import Tool
+from langchain_core.tools import Tool
 from langchain_community.utilities import GoogleSerperAPIWrapper
 import json
 from dotenv import load_dotenv
