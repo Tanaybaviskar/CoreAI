@@ -5,3 +5,5 @@ langgraph
 python-dotenv
 httpx
 pydantic
+flask
+flask-cors
