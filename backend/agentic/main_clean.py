@@ -11,13 +11,9 @@ import os
 import socket
 from datetime import datetime
 import secrets
-import logging
 
 from agents.supervisor import SupervisorAgent
-from utils.oauth_helper import oauth_helper  # Use the global instance
-
-# Set up logging
-logger = logging.getLogger(__name__)
+from utils.oauth_helper import GoogleOAuthHelper
 
 # Load environment variables
 load_dotenv()
@@ -29,25 +25,15 @@ CORS(app, supports_credentials=True)
 # Set secret key for sessions
 app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
 
-# Note: oauth_helper is imported from utils.oauth_helper (global instance)
-# This ensures all parts of the app use the same OAuth session storage
+# Initialize OAuth helper
+oauth_helper = GoogleOAuthHelper()
 
 # Initialize the Supervisor Agent (coordinates all specialized agents)
 supervisor = SupervisorAgent()
 
 def find_available_port(start_port=5000, max_attempts=100):
-    """Find an available port starting from start_port, prefer exact start_port"""
-    # First try the exact start_port
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('0.0.0.0', start_port))
-        sock.close()
-        return start_port
-    except OSError:
-        pass
-
-    # If start_port is not available, try others
-    for port in range(start_port + 1, start_port + max_attempts):
+    """Find an available port starting from start_port"""
+    for port in range(start_port, start_port + max_attempts):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.bind(('0.0.0.0', port))
@@ -91,16 +77,6 @@ def invoke_agent():
 
         if not message:
             return jsonify({"error": "Message is required"}), 400
-
-        # Add authenticated user email to context if logged in
-        user_email = session.get('user_email')
-        if user_email:
-            context['user_email'] = user_email
-            context['authenticated'] = True
-            logger.info(f"Adding authenticated user to context: {user_email}")
-        else:
-            context['authenticated'] = False
-            logger.info("No authenticated user in session")
 
         def generate():
             """Stream response"""
@@ -310,27 +286,9 @@ def oauth_callback():
     # Clean up OAuth state
     session.pop('oauth_state', None)
 
-    # Redirect to frontend success page - detect frontend port dynamically
-    frontend_host = request.host.split(':')[0]  # Get just the hostname
-
-    # Try to find active frontend port (Next.js typically uses 3000-3010 range)
-    frontend_port = None
-    for port in range(3000, 3011):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex((frontend_host, port))
-            sock.close()
-            if result == 0:  # Port is open
-                frontend_port = port
-                break
-        except:
-            continue
-
-    if frontend_port:
-        return redirect(f"http://{frontend_host}:{frontend_port}?auth=success")
-    else:
-        # Fallback to common port
-        return redirect(f"http://{frontend_host}:3000?auth=success")
+    # Get the frontend port dynamically (since it auto-selects now)
+    frontend_url = request.host_url.replace(':500', ':300')  # Assume frontend is on 300x range
+    return redirect(f"{frontend_url}?auth=success")
 
 
 @app.route('/auth/logout', methods=['POST'])
@@ -425,44 +383,32 @@ def format_agent_response(result: dict) -> str:
 
 
 if __name__ == "__main__":
-    # Force port 5000 ONLY - no auto-detection
-    FIXED_PORT = 5000
+    # Find available port
+    port = find_available_port(5000)
+    if not port:
+        print("[ERROR] Could not find available port!")
+        exit(1)
 
-    # Only check port availability if not in Flask reloader subprocess
-    if not os.environ.get('WERKZEUG_RUN_MAIN'):
-        # Test if port 5000 is available (only on main process)
-        try:
-            import socket
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.bind(('0.0.0.0', FIXED_PORT))
-            test_socket.close()
-            print(f"[SUCCESS] Port {FIXED_PORT} is available")
-        except OSError:
-            print(f"[ERROR] Port {FIXED_PORT} is already in use!")
-            print(f"[ERROR] Please stop any service using port {FIXED_PORT} and restart")
-            print(f"[ERROR] You can use: netstat -ano | findstr :{FIXED_PORT}")
-            exit(1)
-
-        print("\n>> Server Configuration:")
-        print(f"   Host: 0.0.0.0")
-        print(f"   Port: {FIXED_PORT} (FIXED)")
-        print(f"   Mode: {'Debug' if os.getenv('DEBUG', 'True') == 'True' else 'Production'}")
-        print("\n>> Available Endpoints:")
-        print("   GET  /health      - System health check")
-        print("   POST /invoke      - Process user request")
-        print("   GET  /dashboard   - Get dashboard data")
-        print("   GET  /agents      - Get all agents status")
-        print("   GET  /memory      - Get memory items")
-        print("   GET  /settings    - Get system settings")
-        print("   GET  /activity    - Get activity log")
-        print("   GET  /auth/*      - OAuth endpoints")
-        print("\n" + "=" * 60)
-        print(f">> CoreAI is ready! Backend FIXED on: http://localhost:{FIXED_PORT}")
-        print("=" * 60 + "\n")
+    print("\n>> Server Configuration:")
+    print(f"   Host: 0.0.0.0")
+    print(f"   Port: {port}")
+    print(f"   Mode: {'Debug' if os.getenv('DEBUG', 'True') == 'True' else 'Production'}")
+    print("\n>> Available Endpoints:")
+    print("   GET  /health      - System health check")
+    print("   POST /invoke      - Process user request")
+    print("   GET  /dashboard   - Get dashboard data")
+    print("   GET  /agents      - Get all agents status")
+    print("   GET  /memory      - Get memory items")
+    print("   GET  /settings    - Get system settings")
+    print("   GET  /activity    - Get activity log")
+    print("   GET  /auth/*      - OAuth endpoints")
+    print("\n" + "=" * 60)
+    print(f">> CoreAI is ready! Backend running on: http://localhost:{port}")
+    print("=" * 60 + "\n")
 
     app.run(
         host='0.0.0.0',
-        port=FIXED_PORT,
+        port=port,
         debug=os.getenv('DEBUG', 'True') == 'True',
         threaded=True
     )
