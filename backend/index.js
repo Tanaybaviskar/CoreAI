@@ -78,7 +78,7 @@ createProxy('/activity');
 
 // Tasks needs its own handler: it has dynamic sub-paths (/api/tasks/5/complete)
 // that the fixed-path createProxy() helper above doesn't cover.
-app.all('/api/tasks*', async (req, res) => {
+app.all(/^\/api\/tasks(\/.*)?$/, async (req, res) => {
   const subPath = req.originalUrl.replace('/api', '');
   try {
     const response = await axios({

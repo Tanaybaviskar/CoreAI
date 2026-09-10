@@ -73,13 +73,11 @@ class CalendarAgent(BaseAgent):
 
             # Check availability
             if "free" in task_lower or "available" in task_lower or "availability" in task_lower:
-                result = await self._check_availability(user_email, context)
-            # Schedule event
-            elif "schedule" in task_lower or "book" in task_lower or "create" in task_lower:
-                result = await self._create_event(user_email, task, context)
-            # List events
+                result = await self._check_availability(...)
+            elif "schedule" in task_lower or "book" in task_lower or "create" in task_lower or "add" in task_lower:
+                result = await self._create_event(...)
             elif "show" in task_lower or "list" in task_lower or "what" in task_lower or "calendar" in task_lower:
-                result = await self._list_events(user_email, context)
+                result = await self._list_events(...)   # <-- your message landed here
             # Cancel event
             elif "cancel" in task_lower or "delete" in task_lower:
                 result = await self._cancel_event(user_email, context)
