@@ -4,12 +4,18 @@ Supervisor Agent - Coordinates all specialized agents
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import asyncio
+import sys
+from pathlib import Path
 from .base_agent import BaseAgent, logger
 from .calendar_agent import CalendarAgent
 from .meeting_agent import MeetingAgent
 from .email_agent import EmailAgent
 from .info_agents import WeatherAgent, NewsAgent
 from .task_agent import TaskAgent
+
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.gemini_client import get_gemini_client
 
 
 class SupervisorAgent:
@@ -30,13 +36,14 @@ class SupervisorAgent:
             TaskAgent(),
         ]
         self.conversation_history: List[Dict[str, Any]] = []
+        self.gemini = get_gemini_client()
 
     async def process_request(self, user_message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Process user request by:
-        1. Analyzing the request
-        2. Determining which agent(s) can handle it
-        3. Coordinating execution
+        1. Using LLM to classify query intent
+        2. Determining if an agent is needed or if it's conversational
+        3. Coordinating execution appropriately
         4. Returning consolidated response
         """
         if context is None:
@@ -51,22 +58,33 @@ class SupervisorAgent:
             "content": user_message
         })
 
-        # Find capable agents
-        capable_agents = []
-        for agent in self.agents:
-            if agent.can_handle(user_message):
-                capable_agents.append(agent)
-                logger.info(f"[Supervisor] Agent {agent.name} can handle this request")
+        # Use LLM to classify query intent
+        agent_names = [agent.name for agent in self.agents]
+        classification = self.gemini.classify_query_intent(user_message, agent_names)
 
-        if not capable_agents:
-            # No specific agent, handle as general query
+        logger.info(f"[Supervisor] Classification: {classification}")
+
+        # If it's a general query (no agent needed), handle conversationally
+        if not classification["needs_agent"]:
             result = await self._handle_general_query(user_message, context)
-        elif len(capable_agents) == 1:
-            # Single agent can handle it
-            result = await self._execute_single_agent(capable_agents[0], user_message, context)
         else:
-            # Multiple agents might be needed (complex task)
-            result = await self._execute_complex_task(capable_agents, user_message, context)
+            # Find capable agents based on both LLM classification and agent's own can_handle
+            capable_agents = []
+            for agent in self.agents:
+                if agent.can_handle(user_message):
+                    capable_agents.append(agent)
+                    logger.info(f"[Supervisor] Agent {agent.name} can handle this request")
+
+            if not capable_agents:
+                # LLM thinks we need an agent but none matched - still handle conversationally
+                logger.info("[Supervisor] No agent matched, falling back to conversational response")
+                result = await self._handle_general_query(user_message, context)
+            elif len(capable_agents) == 1:
+                # Single agent can handle it
+                result = await self._execute_single_agent(capable_agents[0], user_message, context)
+            else:
+                # Multiple agents might be needed (complex task)
+                result = await self._execute_complex_task(capable_agents, user_message, context)
 
         # Record response
         self.conversation_history.append({
@@ -200,17 +218,32 @@ class SupervisorAgent:
         }
 
     async def _handle_general_query(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle general queries that don't require specialized agents"""
-        logger.info("[Supervisor] Handling as general query")
+        """Handle general queries using Gemini LLM for conversation"""
+        logger.info("[Supervisor] Handling as general conversational query")
 
-        # This would typically go to an LLM for general conversation
-        return {
-            "success": True,
-            "agent": "Supervisor",
-            "message": "I receive your request. While I don't have a specialized agent for this specific task, I can help coordinate various services like calendar, email, meetings, tasks, weather, and news. What would you like to do?",
-            "available_agents": [agent.name for agent in self.agents],
-            "timestamp": datetime.now().isoformat()
-        }
+        try:
+            # Get user ID for chat history
+            user_id = context.get('user_email', 'default')
+
+            # Get conversational response from Gemini
+            response_text = self.gemini.chat(query, context, user_id)
+
+            return {
+                "success": True,
+                "agent": "CoreAI Assistant",
+                "message": response_text,
+                "type": "conversational",
+                "timestamp": datetime.now().isoformat()
+            }
+
+        except Exception as e:
+            logger.error(f"[Supervisor] Error in general query handling: {str(e)}")
+            return {
+                "success": False,
+                "agent": "Supervisor",
+                "message": f"I apologize, but I encountered an error: {str(e)}. Please try again.",
+                "timestamp": datetime.now().isoformat()
+            }
 
     def get_all_agents_status(self) -> List[Dict[str, Any]]:
         """Get status of all agents"""

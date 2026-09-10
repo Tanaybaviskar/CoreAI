@@ -76,6 +76,27 @@ createProxy('/settings');
 createProxy('/memory');
 createProxy('/activity');
 
+// Tasks needs its own handler: it has dynamic sub-paths (/api/tasks/5/complete)
+// that the fixed-path createProxy() helper above doesn't cover.
+app.all('/api/tasks*', async (req, res) => {
+  const subPath = req.originalUrl.replace('/api', '');
+  try {
+    const response = await axios({
+      method: req.method,
+      url: `${AGENT_API_URL_BASE}${subPath}`,
+      data: req.body,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    });
+    res.status(response.status).json(response.data);
+  } catch (error) {
+    console.error(`Proxy error for ${subPath}:`, error.message);
+    const status = error.response?.status || 500;
+    const data = error.response?.data || { error: `Failed to proxy to agent endpoint: ${subPath}` };
+    res.status(status).json(data);
+  }
+});
+
 // Note: OAuth endpoints (/auth/*) should go directly to backend, not through proxy
 // OAuth flow: Frontend -> Backend (port 5000) -> Google -> Backend (port 5000)
 // Chat flow: Frontend -> Proxy (port 3001) -> Backend (port 5000)

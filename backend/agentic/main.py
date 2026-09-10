@@ -15,6 +15,16 @@ import logging
 
 from agents.supervisor import SupervisorAgent
 from utils.oauth_helper import oauth_helper  # Use the global instance
+from database import init_db, get_session, ConversationMessage, MemoryItem
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+# --- Prometheus metrics (JD: "application logging and monitoring") ---
+REQUEST_COUNT = Counter(
+    "coreai_requests_total", "Total requests to /invoke", ["success"]
+)
+REQUEST_LATENCY = Histogram(
+    "coreai_request_latency_seconds", "Latency of /invoke requests"
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -34,6 +44,9 @@ app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
 
 # Initialize the Supervisor Agent (coordinates all specialized agents)
 supervisor = SupervisorAgent()
+
+# Create DB tables on startup (Postgres in prod via DATABASE_URL, SQLite locally)
+init_db()
 
 def find_available_port(start_port=5000, max_attempts=100):
     """Find an available port starting from start_port, prefer exact start_port"""
@@ -102,12 +115,19 @@ def invoke_agent():
             context['authenticated'] = False
             logger.info("No authenticated user in session")
 
+        # Persist the incoming user message immediately so it survives even
+        # if the agent call below fails.
+        with get_session() as db:
+            db.add(ConversationMessage(thread_id=thread_id, role="user", content=message))
+
         def generate():
-            """Stream response"""
+            """Stream response and persist it to the DB once complete."""
+            start = datetime.now()
             try:
                 # Process through supervisor agent
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                context['thread_id'] = thread_id
                 result = loop.run_until_complete(
                     supervisor.process_request(message, context)
                 )
@@ -120,14 +140,99 @@ def invoke_agent():
                 for char in response_text:
                     yield char
 
+                with get_session() as db:
+                    db.add(ConversationMessage(
+                        thread_id=thread_id,
+                        role="assistant",
+                        content=response_text,
+                        agent=result.get("agent") if isinstance(result, dict) else None,
+                    ))
+                REQUEST_COUNT.labels(success="true").inc()
+
             except Exception as e:
                 error_msg = f"\n\n[!] Error: {str(e)}"
+                REQUEST_COUNT.labels(success="false").inc()
                 yield error_msg
+            finally:
+                REQUEST_LATENCY.observe((datetime.now() - start).total_seconds())
 
         return Response(generate(), mimetype='text/plain')
 
     except Exception as e:
+        REQUEST_COUNT.labels(success="false").inc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """Prometheus scrape endpoint."""
+    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+
+
+@app.route('/tasks', methods=['GET', 'POST'])
+def tasks_collection():
+    """REST endpoint for tasks — used directly by the frontend (not routed
+    through the chat/agent layer, since parsing task IDs out of free-text
+    agent responses is unreliable for a UI)."""
+    from database import get_session, Task as TaskModel
+
+    if request.method == 'GET':
+        thread_id = request.args.get('thread_id', 'default')
+        show_completed = request.args.get('show_completed', 'false').lower() == 'true'
+        with get_session() as db:
+            query = db.query(TaskModel).filter(TaskModel.thread_id == thread_id)
+            if not show_completed:
+                query = query.filter(TaskModel.is_complete.is_(False))
+            tasks = [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "completed": t.is_complete,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                    "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                }
+                for t in query.order_by(TaskModel.created_at.desc()).all()
+            ]
+        return jsonify({"tasks": tasks})
+
+    data = request.get_json() or {}
+    title = data.get('title')
+    thread_id = data.get('thread_id', 'default')
+    if not title:
+        return jsonify({"error": "title is required"}), 400
+    with get_session() as db:
+        task = TaskModel(thread_id=thread_id, title=title)
+        db.add(task)
+        db.flush()
+        saved = {"id": task.id, "title": task.title, "completed": task.is_complete}
+    return jsonify({"task": saved}), 201
+
+
+@app.route('/tasks/<int:task_id>/complete', methods=['POST'])
+def complete_task_rest(task_id):
+    from database import get_session, Task as TaskModel
+
+    with get_session() as db:
+        task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        task.is_complete = True
+        task.completed_at = datetime.now()
+        db.flush()
+        saved = {"id": task.id, "title": task.title, "completed": task.is_complete}
+    return jsonify({"task": saved})
+
+
+@app.route('/tasks/<int:task_id>', methods=['DELETE'])
+def delete_task_rest(task_id):
+    from database import get_session, Task as TaskModel
+
+    with get_session() as db:
+        task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        db.delete(task)
+    return jsonify({"status": "deleted"})
 
 
 @app.route('/dashboard', methods=['GET'])
@@ -191,19 +296,24 @@ def get_agent_info(agent_name):
 
 @app.route('/memory', methods=['GET', 'POST'])
 def manage_memory():
-    """Manage agent memory/knowledge base"""
+    """Manage agent memory/knowledge base (persisted in the DB)"""
     if request.method == 'GET':
-        return jsonify({
-            "memory_items": [
-                {"id": "1", "key": "User Preference", "value": "Prefers detailed explanations"},
-                {"id": "2", "key": "Project Context", "value": "Working on CoreAI multi-agent system"},
-                {"id": "3", "key": "Communication Style", "value": "Professional and concise"},
-                {"id": "4", "key": "Timezone", "value": "UTC"},
-            ]
-        })
+        with get_session() as db:
+            items = db.query(MemoryItem).order_by(MemoryItem.created_at.desc()).all()
+            memory_items = [{"id": str(i.id), "key": i.key, "value": i.value} for i in items]
+        return jsonify({"memory_items": memory_items})
     elif request.method == 'POST':
-        data = request.get_json()
-        return jsonify({"status": "Memory item added", "data": data})
+        data = request.get_json() or {}
+        key = data.get("key")
+        value = data.get("value")
+        if not key or not value:
+            return jsonify({"error": "key and value are required"}), 400
+        with get_session() as db:
+            item = MemoryItem(key=key, value=value)
+            db.add(item)
+            db.flush()
+            saved = {"id": str(item.id), "key": item.key, "value": item.value}
+        return jsonify({"status": "Memory item added", "data": saved})
 
 
 @app.route('/settings', methods=['GET', 'POST'])
@@ -225,22 +335,24 @@ def manage_settings():
 
 @app.route('/activity', methods=['GET'])
 def get_activity():
-    """Get recent activity log"""
-    # Get recent conversation history
-    recent_conversations = supervisor.conversation_history[-10:]
+    """Get recent activity log, sourced from the persisted conversation history"""
+    with get_session() as db:
+        recent = (
+            db.query(ConversationMessage)
+            .order_by(ConversationMessage.created_at.desc())
+            .limit(10)
+            .all()
+        )
 
     activities = []
-    for conv in recent_conversations:
-        time = datetime.fromisoformat(conv['timestamp']).strftime("%I:%M %p")
-        if conv['role'] == 'user':
-            text = f"User: {conv['content'][:50]}..."
+    for conv in reversed(recent):
+        time = conv.created_at.strftime("%I:%M %p") if conv.created_at else ""
+        if conv.role == 'user':
+            text = f"User: {conv.content[:50]}..."
         else:
-            text = f"Assistant completed request"
+            text = f"Assistant ({conv.agent or 'Supervisor'}) completed request"
 
-        activities.append({
-            "time": time,
-            "text": text
-        })
+        activities.append({"time": time, "text": text})
 
     return jsonify({"activities": activities})
 

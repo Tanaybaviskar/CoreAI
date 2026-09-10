@@ -1,363 +1,129 @@
-# 🚀 CoreAI - Enterprise Multi-Agent AI Assistant
+# CoreAI
 
-An enterprise-level AI assistant powered by a sophisticated multi-agent system. CoreAI coordinates specialized agents to handle your daily tasks including calendar management, email handling, meeting scheduling, weather updates, news aggregation, and task management.
+CoreAI is a multi-agent backend for handling calendar, email, and task requests through a single conversational API. A supervisor agent routes each request to the right specialist agent (or chains several together for multi-step actions, like checking availability before booking a meeting), persists conversation and task state to Postgres, and integrates with Google Calendar and Gmail via OAuth.
 
-![Enterprise AI](https://img.shields.io/badge/AI-Enterprise%20Grade-purple)
-![Multi-Agent](https://img.shields.io/badge/Architecture-Multi--Agent-blue)
-![Status](https://img.shields.io/badge/Status-Production%20Ready-green)
+It's a personal project built to explore agent orchestration patterns on top of a fairly standard Flask/Node/Postgres backend.
 
-## ✨ Features
-
-### 🤖 Specialized AI Agents
-
-- **📅 Calendar Agent**: Google Calendar integration for scheduling and availability checks
-- **🎥 Meeting Agent**: Google Meet video conference management
-- **📧 Email Agent**: Gmail operations - send, read, search, and organize
-- **🌤️ Weather Agent**: Real-time weather data and forecasts
-- **📰 News Agent**: News aggregation from multiple sources
-- **✅ Task Agent**: Task and to-do list management
-
-### 🎯 Supervisor Coordination
-
-The Supervisor Agent intelligently:
-- Routes requests to appropriate specialist agents
-- Coordinates multi-step workflows (e.g., calendar check → meeting creation → calendar booking)
-- Manages agent communication and data flow
-- Provides unified response formatting
-
-### 🎨 Enterprise Frontend
-
-- **Modern Design**: Glassmorphism UI with animated gradients
-- **Real-time Updates**: Live agent status monitoring
-- **Responsive Dashboard**: Activity feeds and analytics
-- **Multi-page Navigation**: Dashboard, Chat, Agents, Connections, Memory, Settings
-
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Frontend (Next.js)                    │
-│  Dashboard • Chat • Agents • Connections • Memory • Settings │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ HTTP/REST
-┌──────────────────────┴──────────────────────────────────────┐
-│                   Node.js Proxy Server                       │
-│                      (Port 3001)                             │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Forward/Stream
-┌──────────────────────┴──────────────────────────────────────┐
-│              Python Flask Server (Port 5001)                 │
-│                                                              │
-│  ┌────────────────────────────────────────────────────┐    │
-│  │            Supervisor Agent                        │    │
-│  │  (Coordinates all specialist agents)               │    │
-│  └──────┬──────────────────────────────────────┬──────┘    │
-│         │                                       │            │
-│  ┌──────┴───────┐  ┌──────────────┐  ┌────────┴──────┐    │
-│  │  Calendar    │  │   Meeting    │  │    Email      │    │
-│  │    Agent     │  │    Agent     │  │    Agent      │    │
-│  └──────────────┘  └──────────────┘  └───────────────┘    │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐    │
-│  │   Weather    │  │    News      │  │     Task      │    │
-│  │    Agent     │  │    Agent     │  │     Agent     │    │
-│  └──────────────┘  └──────────────┘  └───────────────┘    │
-└────────────────────────────────────────────────────────────┘
+Frontend (Next.js)
+        |  HTTP/REST
+Node.js Proxy (Express, port 3001)
+        |  Forward/Stream
+Flask API (port 5000)
+        |
+Supervisor Agent
+   |    |    |    |    |    |
+Calendar Meeting Email Weather News Task
 ```
 
-## 🚀 Quick Start
+The Node proxy forwards requests to Flask and streams the response back; it also handles CORS and cookie forwarding for session-based auth. The Flask service does the actual work: routing requests to agents, calling external APIs (Google Calendar/Gmail, weather, news), and reading/writing Postgres.
 
-### Prerequisites
+## Setup
 
-- Node.js 18+ and npm
-- Python 3.9+
-- Git
+Requirements: Python 3.9+, Node 18+, Docker (optional, for the full stack).
 
-### 1. Clone Repository
+### Option 1 — Docker (recommended)
 
 ```bash
 git clone https://github.com/Tanaybaviskar/CoreAI.git
 cd CoreAI
+cp backend/agentic/.env.example backend/agentic/.env   # fill in your API keys
+docker compose up --build
 ```
 
-### 2. Backend Setup
+This starts Postgres, the Flask API, and the Node proxy together.
 
-#### Install Python Dependencies
+### Option 2 — run locally
 
 ```bash
 cd backend/agentic
-
-# Create virtual environment
 python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-
-# Install dependencies
+venv\Scripts\activate      # or: source venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
+cp .env.example .env       # fill in your API keys
+python main.py             # http://localhost:5000, falls back to local SQLite
 ```
 
-#### Configure Environment Variables
-
 ```bash
-# Copy example environment file
-cp .env.example .env
-
-# Edit .env and add your API keys
-# At minimum, you need:
-# - GOOGLE_API_KEY (from Google AI Studio)
-# - SERPER_API_KEY (for web search)
-```
-
-#### Start Python Server
-
-```bash
-python main.py
-# Server will start on http://localhost:5001
-```
-
-### 3. Node.js Proxy Setup
-
-```bash
-cd ../../backend
-
-# Install dependencies
+cd backend
 npm install
-
-# Start proxy server
-node index.js
-# Server will start on http://localhost:3001
+node index.js               # http://localhost:3001
 ```
-
-### 4. Frontend Setup
 
 ```bash
-cd ../frontend
-
-# Install dependencies
+cd frontend
 npm install
-
-# Start development server
-npm run dev
-# Frontend will start on http://localhost:3000
+npm run dev                 # http://localhost:3000
 ```
 
-### 5. Access CoreAI
+### API keys
 
-Open your browser to `http://localhost:3000`
+- `GOOGLE_API_KEY` — Gemini, from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- `SERPER_API_KEY` — web search, from [serper.dev](https://serper.dev)
+- Google Calendar/Gmail OAuth client — from [Google Cloud Console](https://console.cloud.google.com), see `GOOGLE_SETUP.md`
+- Weather/News API keys are optional; those agents degrade gracefully without them
 
-## 🔑 API Keys & Integration
+## Database
 
-### Required APIs
+Conversation history, tasks, and memory items are persisted via SQLAlchemy. `DATABASE_URL` controls the backend — set it to a Postgres URL in production/Docker, or leave it unset for a local SQLite file during development. Models are in `backend/agentic/database.py`; tables are created automatically on startup.
 
-1. **Google AI API** (Required)
-   - Get from: https://aistudio.google.com/apikey
-   - Used for: AI model (Gemini)
+## Testing
 
-2. **Serper API** (Required for search)
-   - Get from: https://serper.dev
-   - Used for: Web search functionality
+```bash
+cd backend/agentic
+pytest tests/ -v
+```
 
-### Optional APIs (for full functionality)
+Tests run against an isolated SQLite database and cover the health check, `/invoke` request validation, task persistence, `/memory`, and `/metrics`.
 
-3. **Google Calendar API**
-   - Get from: https://console.cloud.google.com
-   - Enable: Google Calendar API
-   - Used for: Calendar management
+## Monitoring
 
-4. **Gmail API**
-   - Get from: https://console.cloud.google.com
-   - Enable: Gmail API
-   - Used for: Email operations
+`GET /metrics` exposes Prometheus-format counters and latency histograms for `/invoke` requests.
 
-5. **Google Meet API**
-   - Part of Google Workspace
-   - Used for: Meeting creation
+## API reference
 
-6. **Weather API**
-   - Options: OpenWeatherMap, WeatherAPI
-   - Get from: https://openweathermap.org/api
-   - Used for: Weather information
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Health check + agent status |
+| POST | `/invoke` | Send a message, get a routed agent response |
+| GET | `/agents` | List all agents and their status |
+| GET/POST | `/memory` | Read/write persisted memory items |
+| GET | `/activity` | Recent conversation activity |
+| GET | `/metrics` | Prometheus metrics |
+| GET | `/auth/login` | Start Google OAuth flow |
+| GET | `/auth/status` | Check current auth state |
 
-7. **News API**
-   - Get from: https://newsapi.org
-   - Used for: News aggregation
-
-## 📁 Project Structure
+## Project structure
 
 ```
 CoreAI/
-├── frontend/                      # Next.js Frontend
-│   ├── src/
-│   │   └── app/
-│   │       ├── page.tsx          # Main application
-│   │       ├── layout.tsx        # Root layout
-│   │       └── globals.css       # Global styles
-│   ├── package.json
-│   └── tsconfig.json
-│
-├── backend/                       # Node.js Proxy Server
-│   ├── index.js                  # Express server
-│   └── package.json
-│
-└── backend/agentic/              # Python Multi-Agent System
-    ├── agents/                   # Agent implementations
-    │   ├── base_agent.py        # Base agent class
-    │   ├── supervisor.py        # Supervisor coordinator
-    │   ├── calendar_agent.py    # Calendar operations
-    │   ├── meeting_agent.py     # Meeting management
-    │   ├── email_agent.py       # Email handling
-    │   ├── task_agent.py        # Task management
-    │   ├── info_agents.py       # Weather & News agents
-    │   └── __init__.py
-    ├── main.py                   # Flask server
-    ├── requirements.txt          # Python dependencies
-    └── .env.example             # Environment template
+├── frontend/                 Next.js UI
+├── backend/
+│   ├── index.js               Express proxy (port 3001)
+│   └── agentic/                Flask API (port 5000)
+│       ├── main.py
+│       ├── database.py         SQLAlchemy models + session handling
+│       ├── agents/             Supervisor + specialist agents
+│       ├── utils/               OAuth, API clients
+│       └── tests/
+├── docker-compose.yml
+└── backend/agentic/Dockerfile, backend/Dockerfile
 ```
 
-## 💡 Usage Examples
+## Known limitations
 
-### Example 1: Schedule a Meeting
+- `/invoke` streams the fully-computed response character by character rather than true token-level streaming from the LLM.
+- Agent routing is keyword-based (`can_handle()`), not LLM-driven intent classification, despite LangGraph being listed as a dependency — this is the next thing I want to rework.
+- No retry/backoff around external Google API calls yet.
 
-**You**: "Schedule a meeting for tomorrow at 2 PM"
+## Tech stack
 
-**CoreAI**:
-1. Calendar Agent checks availability for 2 PM
-2. Meeting Agent creates Google Meet link
-3. Calendar Agent books the time slot
-4. Returns: Meeting link + Calendar confirmation
+**Frontend:** Next.js, React, TypeScript, Tailwind CSS
+**Backend:** Flask, LangChain, Google Gemini, Express, Axios
+**Data/infra:** PostgreSQL, SQLAlchemy, Docker, Prometheus
 
-### Example 2: Check Weather & Read Emails
+## License
 
-**You**: "What's the weather like and do I have any new emails?"
-
-**CoreAI**:
-1. Weather Agent fetches current weather
-2. Email Agent checks inbox
-3. Returns: Weather summary + Email list
-
-### Example 3: Task Management
-
-**You**: "Add a task to review the project proposal"
-
-**CoreAI**:
-1. Task Agent creates new task
-2. Returns: Task confirmation with ID
-
-## 🎨 Frontend Features
-
-### Dashboard
-- Real-time clock display
-- Agent statistics (conversations, active agents, API calls, success rate)
-- Recent activity feed
-- Interactive stat cards
-
-### Chat Interface
-- Streaming responses
-- Agent identification in messages
-- Message history
-- Real-time typing indicators
-
-### Agents Page
-- Live agent status monitoring
-- Success rate visualization
-- Last action display
-- Performance metrics
-
-### Connections
-- API integration management
-- Connection status indicators
-- Quick connect/disconnect
-
-### Memory
-- Long-term memory storage
-- Key-value pairs
-- Editable entries
-
-### Settings
-- User profile customization
-- AI persona selection
-- System configuration
-- Data management
-
-## 🛠️ Technologies
-
-### Frontend
-- **Next.js 15** - React framework
-- **React 19** - UI library
-- **TypeScript** - Type safety
-- **Tailwind CSS 4** - Styling
-
-### Backend (Python)
-- **Flask** - Web framework
-- **LangGraph** - Agent workflow orchestration
-- **LangChain** - LLM framework
-- **Google Gemini** - AI model
-
-### Backend (Node.js)
-- **Express** - Web server
-- **Axios** - HTTP client
-- **CORS** - Cross-origin support
-
-## 🔒 Security Notes
-
-- Never commit `.env` files with real API keys
-- Use environment variables for all sensitive data
-- Implement rate limiting in production
-- Add authentication for deployed applications
-- Use HTTPS in production
-
-## 🚢 Deployment
-
-### Frontend (Vercel)
-```bash
-cd frontend
-vercel deploy
-```
-
-### Backend (Railway/Heroku)
-```bash
-# Deploy Python server
-cd backend/agentic
-# Follow your platform's deployment guide
-
-# Deploy Node proxy
-cd ../
-# Follow your platform's deployment guide
-```
-
-## 📊 Performance
-
-- **Response Time**: < 2s for most operations
-- **Agent Coordination**: Parallel execution where possible
-- **Streaming**: Real-time response streaming
-- **Caching**: Intelligent API response caching
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📝 License
-
-MIT License - see LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- Google AI for Gemini API
-- LangChain & LangGraph teams
-- Next.js team
-- Open source community
-
-## 📧 Contact
-
-For questions and support, please open an issue on GitHub.
-
----
-
-**Built with ❤️ using cutting-edge AI technology**
+MIT

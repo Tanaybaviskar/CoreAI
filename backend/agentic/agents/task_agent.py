@@ -1,22 +1,20 @@
 """
-Task Agent - Manages tasks and to-do lists
+Task Agent - Manages tasks and to-do lists (persisted in the database)
 """
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
-import os
 from .base_agent import BaseAgent, logger
+from database import get_session, Task
 
 
 class TaskAgent(BaseAgent):
-    """Agent specialized in task management"""
+    """Agent specialized in task management. Backed by the `tasks` DB table."""
 
     def __init__(self):
         super().__init__(
             name="Task Agent",
             description="Manages tasks, to-do lists, and reminders"
         )
-        # Store tasks in memory (in real implementation, use database)
-        self.tasks: List[Dict[str, Any]] = []
 
     def can_handle(self, task: str) -> bool:
         """Check if this agent can handle the task"""
@@ -56,32 +54,34 @@ class TaskAgent(BaseAgent):
                 "message": "Failed to process task request"
             }
 
+    @staticmethod
+    def _serialize(task: Task) -> Dict[str, Any]:
+        return {
+            "id": task.id,
+            "title": task.title,
+            "completed": task.is_complete,
+            "created_at": task.created_at.isoformat() if task.created_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        }
+
     async def _add_task(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a new task"""
+        """Add a new task, persisted to the DB"""
         self.update_status("active", "Adding new task")
 
         title = context.get("title", "New Task")
-        description = context.get("description", "")
-        priority = context.get("priority", "medium")
-        due_date = context.get("due_date")
+        thread_id = context.get("thread_id", "default")
 
-        new_task = {
-            "id": f"task_{len(self.tasks) + 1}",
-            "title": title,
-            "description": description,
-            "priority": priority,
-            "due_date": due_date,
-            "completed": False,
-            "created_at": datetime.now().isoformat()
-        }
-
-        self.tasks.append(new_task)
+        with get_session() as db:
+            new_task = Task(thread_id=thread_id, title=title)
+            db.add(new_task)
+            db.flush()  # populate new_task.id before commit
+            serialized = self._serialize(new_task)
 
         return {
             "success": True,
             "agent": self.name,
             "action": "add_task",
-            "task": new_task,
+            "task": serialized,
             "message": f"Added task: {title}"
         }
 
@@ -91,54 +91,40 @@ class TaskAgent(BaseAgent):
 
         task_id = context.get("task_id")
 
-        for task in self.tasks:
-            if task["id"] == task_id:
-                task["completed"] = True
-                task["completed_at"] = datetime.now().isoformat()
+        with get_session() as db:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
                 return {
-                    "success": True,
+                    "success": False,
                     "agent": self.name,
                     "action": "complete_task",
-                    "task": task,
-                    "message": f"Task completed: {task['title']}"
+                    "message": "Task not found"
                 }
+            task.is_complete = True
+            task.completed_at = datetime.utcnow()
+            db.flush()
+            serialized = self._serialize(task)
 
         return {
-            "success": False,
+            "success": True,
             "agent": self.name,
             "action": "complete_task",
-            "message": "Task not found"
+            "task": serialized,
+            "message": f"Task completed: {serialized['title']}"
         }
 
     async def _list_tasks(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """List all tasks"""
+        """List tasks for the current thread"""
         self.update_status("active", "Listing tasks")
 
         show_completed = context.get("show_completed", False)
+        thread_id = context.get("thread_id", "default")
 
-        if show_completed:
-            tasks = self.tasks
-        else:
-            tasks = [t for t in self.tasks if not t["completed"]]
-
-        # Add some default tasks if empty
-        if not tasks:
-            tasks = [
-                {
-                    "id": "task_1",
-                    "title": "Review project documentation",
-                    "priority": "high",
-                    "completed": False,
-                    "created_at": datetime.now().isoformat()
-                },
-                {
-                    "id": "task_2",
-                    "title": "Prepare presentation slides",
-                    "priority": "medium",
-                    "completed": False,
-                    "created_at": datetime.now().isoformat()
-                }
-            ]
+        with get_session() as db:
+            query = db.query(Task).filter(Task.thread_id == thread_id)
+            if not show_completed:
+                query = query.filter(Task.is_complete.is_(False))
+            tasks = [self._serialize(t) for t in query.order_by(Task.created_at.desc()).all()]
 
         return {
             "success": True,
@@ -155,20 +141,22 @@ class TaskAgent(BaseAgent):
 
         task_id = context.get("task_id")
 
-        for i, task in enumerate(self.tasks):
-            if task["id"] == task_id:
-                deleted_task = self.tasks.pop(i)
+        with get_session() as db:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
                 return {
-                    "success": True,
+                    "success": False,
                     "agent": self.name,
                     "action": "delete_task",
-                    "task": deleted_task,
-                    "message": f"Task deleted: {deleted_task['title']}"
+                    "message": "Task not found"
                 }
+            serialized = self._serialize(task)
+            db.delete(task)
 
         return {
-            "success": False,
+            "success": True,
             "agent": self.name,
             "action": "delete_task",
-            "message": "Task not found"
+            "task": serialized,
+            "message": f"Task deleted: {serialized['title']}"
         }

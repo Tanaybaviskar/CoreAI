@@ -11,6 +11,7 @@ from .base_agent import BaseAgent, logger
 # Add utils to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.oauth_helper import get_calendar_service
+from utils.gemini_client import get_gemini_client
 
 
 class CalendarAgent(BaseAgent):
@@ -22,6 +23,7 @@ class CalendarAgent(BaseAgent):
             description="Manages calendar events, checks availability, and schedules appointments"
         )
         self.calendar_id = "primary"
+        self.gemini = get_gemini_client()
 
     def can_handle(self, task: str) -> bool:
         """Check if this agent can handle the task"""
@@ -74,7 +76,7 @@ class CalendarAgent(BaseAgent):
                 result = await self._check_availability(user_email, context)
             # Schedule event
             elif "schedule" in task_lower or "book" in task_lower or "create" in task_lower:
-                result = await self._create_event(user_email, context)
+                result = await self._create_event(user_email, task, context)
             # List events
             elif "show" in task_lower or "list" in task_lower or "what" in task_lower or "calendar" in task_lower:
                 result = await self._list_events(user_email, context)
@@ -234,7 +236,7 @@ class CalendarAgent(BaseAgent):
             logger.error(f"Calendar availability error for {user_email}: {str(e)}")
             return self._fallback_availability()
 
-    async def _create_event(self, user_email: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _create_event(self, user_email: str, task: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """Create a calendar event in real Google Calendar"""
         self.update_status("active", "Creating calendar event")
 
@@ -243,22 +245,52 @@ class CalendarAgent(BaseAgent):
             if not service:
                 return self._fallback_create_event()
 
+            # Use Gemini to extract datetime from the task message
+            logger.info(f"Extracting datetime from task: {task}")
+            datetime_info = self.gemini.extract_datetime_from_query(task)
+            logger.info(f"Extracted datetime info: {datetime_info}")
+
             # Extract event details from context or use defaults
-            title = context.get("title", "New Meeting")
-            start_time = context.get("start_time")
-            end_time = context.get("end_time")
+            title = context.get("title", datetime_info.get("description", "New Meeting"))
             description = context.get("description", "")
             location = context.get("location", "")
 
-            # Parse or generate times
-            if not start_time:
-                start_dt = datetime.now(timezone.utc) + timedelta(hours=1)
-                start_time = start_dt.isoformat()
+            # Build start and end times from extracted datetime
+            if datetime_info.get("has_datetime") and datetime_info.get("date"):
+                date = datetime_info["date"]
+                time = datetime_info.get("time", "09:00")
+                end_time_str = datetime_info.get("end_time", "")
 
-            if not end_time:
-                start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                end_dt = start_dt + timedelta(hours=1)
+                # Parse start time
+                start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+
+                # Parse or calculate end time
+                if end_time_str:
+                    end_dt = datetime.strptime(f"{date} {end_time_str}", "%Y-%m-%d %H:%M")
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                else:
+                    # Use duration from extraction
+                    duration_hours = datetime_info.get("duration_hours", 1.0)
+                    end_dt = start_dt + timedelta(hours=duration_hours)
+
+                start_time = start_dt.isoformat()
                 end_time = end_dt.isoformat()
+
+                logger.info(f"Parsed times - Start: {start_time}, End: {end_time}")
+            else:
+                # Fallback to context or default times
+                start_time = context.get("start_time")
+                end_time = context.get("end_time")
+
+                if not start_time:
+                    start_dt = datetime.now(timezone.utc) + timedelta(hours=1)
+                    start_time = start_dt.isoformat()
+
+                if not end_time:
+                    start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                    end_dt = start_dt + timedelta(hours=1)
+                    end_time = end_dt.isoformat()
 
             # Create event
             event = {
@@ -281,6 +313,11 @@ class CalendarAgent(BaseAgent):
             if attendees:
                 event['attendees'] = [{'email': email} for email in attendees]
 
+            # Add meeting link if provided (from Meeting Agent)
+            meeting_link = context.get("meeting_link")
+            if meeting_link:
+                event['description'] = f"{description}\n\nGoogle Meet: {meeting_link}".strip()
+
             # Create the event
             created_event = service.events().insert(
                 calendarId=self.calendar_id,
@@ -288,6 +325,9 @@ class CalendarAgent(BaseAgent):
             ).execute()
 
             logger.info(f"Created real calendar event {created_event['id']} for {user_email}")
+
+            # Format the start time for display
+            start_display = datetime.fromisoformat(start_time.replace('Z', '+00:00')).strftime('%A, %B %d at %I:%M %p')
 
             return {
                 "success": True,
@@ -297,9 +337,10 @@ class CalendarAgent(BaseAgent):
                 "title": title,
                 "start_time": start_time,
                 "end_time": end_time,
+                "start_display": start_display,
                 "event_link": created_event.get('htmlLink'),
                 "source": "real_calendar_api",
-                "message": f"Successfully created calendar event: {title}"
+                "message": f"Successfully created calendar event '{title}' for {start_display}"
             }
 
         except Exception as e:
